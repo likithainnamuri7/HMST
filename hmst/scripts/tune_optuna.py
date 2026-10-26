@@ -42,6 +42,7 @@ from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 
 try:
+    # pyrefly: ignore[missing-import]
     import optuna
     from optuna.pruners import MedianPruner
     from optuna.samplers import TPESampler
@@ -54,13 +55,19 @@ except ImportError:
 from data import (
     UWIQADataset,
     SAUDDataset,
+    UIDDataset,
     make_uwiqa_splits,
     make_saud_splits,
+    make_uid_splits,
     get_train_transforms,
     get_val_transforms,
 )
 from models import HMST, HMSTLoss, build_correspondence_matrix
 from training import compute_metrics, build_optimizer, SAM
+
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,6 +151,18 @@ class Objective:
             val_size = max(1, len(self.train_idx) // 5)
             self.val_idx = self.train_idx[-val_size:]
             self.train_idx = self.train_idx[:-val_size]
+
+        elif self.dataset_name == "uid":
+            cfg = self.base_cfg["uid"]
+            self.image_dir  = make_absolute(cfg["image_dir"],  project_root)
+            self.score_file = make_absolute(cfg["score_file"], project_root)
+            self.train_idx, self.test_idx = make_uid_splits(
+                self.image_dir, self.score_file, seed=args.seed
+            )
+            val_size  = max(16, (len(self.train_idx) // 5) // 16 * 16)   # whole scenes of 16 images
+            self.val_idx   = self.train_idx[-val_size:]
+            self.train_idx = self.train_idx[:-val_size]
+
         else:
             raise ValueError(f"Unsupported dataset: {self.dataset_name}")
 
@@ -211,10 +230,13 @@ class Objective:
 
         if self.dataset_name == "uwiqa":
             train_ds = UWIQADataset(self.image_dir, self.score_file, self.train_idx, train_tf)
-            val_ds = UWIQADataset(self.image_dir, self.score_file, self.val_idx, val_tf)
-        else:
+            val_ds   = UWIQADataset(self.image_dir, self.score_file, self.val_idx,   val_tf)
+        elif self.dataset_name == "uid":
+            train_ds = UIDDataset(self.image_dir, self.score_file, self.train_idx, train_tf)
+            val_ds   = UIDDataset(self.image_dir, self.score_file, self.val_idx,   val_tf)
+        else:  # saud
             train_ds = SAUDDataset(self.benchmark_dir, self.bt_mat, self.train_idx, train_tf)
-            val_ds = SAUDDataset(self.benchmark_dir, self.bt_mat, self.val_idx, val_tf)
+            val_ds   = SAUDDataset(self.benchmark_dir, self.bt_mat, self.val_idx,   val_tf)
 
         pin_mem = self.device.type == "cuda"
         num_workers = self.args.workers
@@ -381,7 +403,7 @@ def main():
     parser.add_argument("--trials", type=int, default=30, help="Number of trials to run")
     parser.add_argument("--epochs", type=int, default=25, help="Max epochs per trial")
     parser.add_argument("--patience", type=int, default=8, help="Early stopping patience per trial")
-    parser.add_argument("--dataset", type=str, default="uwiqa", choices=["uwiqa", "saud"])
+    parser.add_argument("--dataset", type=str, default="uwiqa", choices=["uwiqa", "saud", "uid"])
     parser.add_argument("--device", type=str, default="auto", help="auto | cuda | cpu")
     parser.add_argument("--workers", type=int, default=4, help="DataLoader num_workers")
     parser.add_argument("--seed", type=int, default=42, help="Seed for split consistency")
@@ -545,6 +567,10 @@ def main():
         "saud": base_cfg.get("saud", {
             "benchmark_dir": "../SAUD/Benchmark",
             "bt_scores_mat": "../SAUD/sub_bt_scores.mat",
+        }),
+        "uid": base_cfg.get("uid", {
+            "image_dir":  "../UID2021/UID2021",
+            "score_file": "../mos_UID.xlsx",
         }),
         "checkpoint_dir": f"checkpoints/{dataset}/{args.study_name}",
         "checkpoint": {

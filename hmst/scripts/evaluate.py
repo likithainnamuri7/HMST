@@ -48,6 +48,11 @@ from training.plots import (
 )
 
 
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate HMST Architecture 1")
     parser.add_argument("--checkpoint", type=str, required=True,
@@ -55,7 +60,7 @@ def main():
     parser.add_argument("--mode", type=str, choices=["test", "full"], default="full",
                         help="Config mode to use for dataset settings")
     parser.add_argument("--dataset", type=str, default=None,
-                        choices=["uwiqa", "saud"])
+                        choices=["uwiqa", "saud", "uid"])
     args = parser.parse_args()
 
     project_root = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
@@ -209,7 +214,7 @@ def main():
         print(f"  Metrics saved to:      {os.path.join(out_dir, f'{split_name.lower()}_metrics.json')}")
         print(f"  Per-image CSV saved to: {pred_csv_path}")
 
-    if dataset in {"uwiqa", "saud"}:
+    if dataset in {"uwiqa", "saud", "uid"}:
         validation_result, validation_result_tta, validation_metrics = plot_results["validation"]
         test_result, test_result_tta, test_metrics = plot_results["test"]
         plot_paths = save_quality_plots(

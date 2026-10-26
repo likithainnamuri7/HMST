@@ -1,7 +1,7 @@
 """
 dataset.py
 ---------------
-Dataset loaders for UWIQA, SAUD and UIED datasets.
+Dataset loaders for UWIQA, SAUD, UIED, and UID2021 datasets.
 
 UWIQA
   890 images (0001.png – 0890.png)
@@ -17,12 +17,19 @@ SAUD
 UIED
 
 
+UID2021
+  960 images across 6 categories × 10 scenes × 16 methods
+  MOS scores in mos_UID.xlsx (range ~0.001 – 8.89, min-max normalised to [0,1])
+  Split: scene-level 80/20 → 48 train-scenes / 12 test-scenes = 768 train / 192 test
+
 Both datasets use the same Dataset class interface.
 """
 
 import os
 import math
 import random
+from collections import defaultdict
+from functools import lru_cache
 import numpy as np
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -251,3 +258,149 @@ def make_saud_splits(
     rng = random.Random(seed)
     rng.shuffle(indices)
     return indices[:n_train], indices[n_train:n_train + n_test]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UID2021 Dataset
+# ─────────────────────────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=4)
+def _build_uid_samples(image_dir: str, score_file: str) -> Tuple[Tuple[str, float, str], ...]:
+    """
+    Build the full list of (img_path, normalised_score, scene_id) triples
+    for the UID2021 dataset.
+
+    Matching: exact lowercase full filename (Name column) vs rglob("*.png").
+    scene_id: parent folder name of the image file (e.g. "B-1").
+    MOS (index 4) is min-max normalised to [0,1] with +1e-8 denominator.
+    """
+    image_root = Path(image_dir)
+
+    # Build {lowercase_filename: Path} for every .png under image_dir
+    img_dict = {p.name.lower(): p for p in image_root.rglob("*.png")}
+
+    wb = openpyxl.load_workbook(score_file, data_only=True)
+    ws = wb.active
+
+    raw_samples = []   # (Path, raw_mos, scene_id)
+    unmatched = []
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        name = row[0]   # full filename, e.g. "ERI_B_1_Bayesian.png"
+        mos  = row[4]   # MOS score
+        if name is None or mos is None:
+            continue
+        key = name.lower()
+        if key in img_dict:
+            img_path = img_dict[key]
+            scene_id = img_path.parent.name   # e.g. "B-1"
+            raw_samples.append((img_path, float(mos), scene_id))
+        else:
+            unmatched.append(name)
+
+    if unmatched:
+        examples = unmatched[:3]
+        print(
+            f"[UID] WARNING: {len(unmatched)} scored rows had no matching image. "
+            f"Examples: {examples}"
+        )
+
+    matched = len(raw_samples)
+    if matched != 960:
+        raise RuntimeError(
+            f"[UID] Expected exactly 960 matched samples, got {matched}. "
+            f"Check that image_dir points to the correct folder."
+        )
+
+    scores_arr = np.array([s for _, s, _ in raw_samples])
+    s_min, s_max = float(scores_arr.min()), float(scores_arr.max())
+    print(f"[UID] Original MOS range: min={s_min:.4f}, max={s_max:.4f}")
+
+    return tuple(
+        (str(p), float((s - s_min) / (s_max - s_min + 1e-8)), sid)
+        for p, s, sid in raw_samples
+    )
+
+
+class UIDDataset(Dataset):
+    """
+    UID2021 dataset loader.
+
+    Args:
+        image_dir:   Path to UID2021/UID2021/ (category folders directly inside)
+        score_file:  Path to mos_UID.xlsx
+        indices:     List of 0-based indices to include (for train/val/test split)
+        transform:   torchvision transform to apply to each image
+        max_samples: Optional cap on number of samples (for local test mode)
+    """
+
+    def __init__(
+        self,
+        image_dir: str,
+        score_file: str,
+        indices: List[int],
+        transform=None,
+        max_samples: Optional[int] = None,
+    ):
+        self.transform = transform
+        all_samples = _build_uid_samples(image_dir, score_file)
+
+        # Apply split indices
+        self.samples = [all_samples[i] for i in indices if i < len(all_samples)]
+
+        # Apply max_samples cap AFTER the split (test mode only)
+        if max_samples is not None:
+            self.samples = self.samples[:max_samples]
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        img_path, score, _ = self.samples[idx]
+        image = Image.open(img_path).convert("RGB")
+        if self.transform is not None:
+            image = self.transform(image)
+        return {
+            "image": image,
+            "score": torch.tensor(score, dtype=torch.float32),
+            "path":  img_path,
+        }
+
+
+def make_uid_splits(
+    image_dir: str,
+    score_file: str,
+    seed: int = 42,
+    train_ratio: float = 0.8,
+) -> Tuple[List[int], List[int]]:
+    """
+    Returns (train_indices, test_indices) for UID2021.
+
+    Split is performed BY SCENE so that no scene straddles train and test.
+    With 60 scenes and train_ratio=0.8 the default split is:
+      48 train-scenes x 16 images = 768 train indices
+      12 test-scenes  x 16 images = 192 test  indices
+    """
+    all_samples = _build_uid_samples(image_dir, score_file)
+
+    # Collect sorted unique scene ids and their image indices
+    scene_to_indices: dict = defaultdict(list)
+    for i, (_, _, scene_id) in enumerate(all_samples):
+        scene_to_indices[scene_id].append(i)
+
+    scene_ids = sorted(scene_to_indices.keys())
+    rng = random.Random(seed)
+    rng.shuffle(scene_ids)
+
+    split_at = int(len(scene_ids) * train_ratio)   # 48
+    train_scenes = scene_ids[:split_at]
+    test_scenes  = scene_ids[split_at:]
+
+    train_indices = [i for sid in train_scenes for i in scene_to_indices[sid]]
+    test_indices  = [i for sid in test_scenes  for i in scene_to_indices[sid]]
+
+    print(
+        f"[UID] Split: {len(train_scenes)} train-scenes / {len(test_scenes)} test-scenes "
+        f"-> {len(train_indices)} train / {len(test_indices)} test images"
+    )
+    return train_indices, test_indices

@@ -11,7 +11,7 @@ mode: full
 seed: 42
 
 # ── Dataset ──────────────────────────────────────────────────
-# Dataset to use: uwiqa | saud
+# Dataset to use: uwiqa | saud | uid
 dataset: uwiqa
 
 uwiqa:
@@ -21,6 +21,10 @@ uwiqa:
 saud:
   benchmark_dir: ../SAUD/SAUD/Benchmark
   bt_scores_mat: ../SAUD/SAUD/sub_bt_scores.mat
+
+uid:
+  image_dir:  ../UID2021/UID2021
+  score_file: ../mos_UID.xlsx
 
 # null = use all available samples
 max_train_samples: null

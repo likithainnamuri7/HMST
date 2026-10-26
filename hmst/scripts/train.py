@@ -31,8 +31,10 @@ import yaml
 from data import (
     UWIQADataset,
     SAUDDataset,
+    UIDDataset,
     make_uwiqa_splits,
     make_saud_splits,
+    make_uid_splits,
     get_train_transforms,
     get_val_transforms,
 )
@@ -45,6 +47,10 @@ from training.plots import (
     save_split_distribution_plots,
     save_training_dynamics_plots,
 )
+
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,6 +229,21 @@ def build_datasets(config: dict, project_root: str):
         val_ds   = UIEDDataset(image_dir, score_file, val_idx,   val_tf,   max_val)
         test_ds  = UIEDDataset(image_dir, score_file, test_idx,  val_tf,   max_test)
 
+    elif dataset_name == "uid":
+        cfg = config["uid"]
+        image_dir  = make_absolute(cfg["image_dir"],  project_root)
+        score_file = make_absolute(cfg["score_file"], project_root)
+
+        train_idx, test_idx = make_uid_splits(image_dir, score_file, seed=seed)
+
+        val_size  = max(16, (len(train_idx) // 5) // 16 * 16)   # whole scenes of 16 images
+        val_idx   = train_idx[-val_size:]
+        train_idx = train_idx[:-val_size]
+
+        train_ds = UIDDataset(image_dir, score_file, train_idx, train_tf, max_train)
+        val_ds   = UIDDataset(image_dir, score_file, val_idx,   val_tf,   max_val)
+        test_ds  = UIDDataset(image_dir, score_file, test_idx,  val_tf,   max_test)
+
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -268,7 +289,7 @@ def main():
         help="Path to a checkpoint to resume from (overrides config.resume)"
     )
     parser.add_argument(
-        "--dataset", type=str, default=None, choices=["uwiqa", "saud", "uied"],
+        "--dataset", type=str, default=None, choices=["uwiqa", "saud", "uied", "uid"],
         help="Override dataset from config"
     )
     parser.add_argument(
@@ -414,7 +435,7 @@ def main():
         plots_complete = all(
             os.path.isfile(os.path.join(output_dir, "plots", name))
             for name in required_plot_names
-        )
+            )
         if num_iterations > 1 and os.path.exists(final_path) and plots_complete:
             print(f"\n[Trainer] Iteration {it+1} already completed. Loading metrics and skipping...")
             import json
@@ -613,7 +634,7 @@ def main():
         result_tta = collect_predictions_tta(model, test_loader, device)
         final_metrics_tta = compute_metrics(result_tta["predictions"], result_tta["targets"])
 
-        if dataset in {"uwiqa", "saud"}:
+        if dataset in {"uwiqa", "saud", "uid"}:
             validation_result_tta = collect_predictions_tta(model, val_loader, device)
             validation_metrics_tta = compute_metrics(
                 validation_result_tta["predictions"],
